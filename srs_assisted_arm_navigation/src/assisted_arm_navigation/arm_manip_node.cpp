@@ -32,11 +32,6 @@ using namespace planning_scene_utils;
 using namespace srs_assisted_arm_navigation;
 using namespace srs_assisted_arm_navigation_msgs;
 
-/**
- *  \todo use controllerDoneCallback / armHasStoppedMoving to check if the arm finished trajectory
- *
- */
-
 
 CArmManipulationEditor::CArmManipulationEditor(planning_scene_utils::PlanningSceneParameters& params, std::vector<string> clist) : PlanningSceneEditor(params)
 {
@@ -47,15 +42,16 @@ CArmManipulationEditor::CArmManipulationEditor(planning_scene_utils::PlanningSce
 
     // ros::param::param<std::string>("~world_frame",world_frame_,WORLD_FRAME);
 
-    ros::param::param<std::string>("~world_frame",collision_objects_frame_id_,WORLD_FRAME);
+    ros::param::param<std::string>("~arm_planning/world_frame",collision_objects_frame_id_,WORLD_FRAME);
+    ros::param::param<bool>("~arm_planning/make_collision_objects_selectable",coll_objects_selectable_,false);
 
     // TODO remove collision_objects_frame_id and keep just world_frame
     world_frame_ =  collision_objects_frame_id_;
 
-    ros::param::param<std::string>("~aco/link",aco_link_,"/arm_7_link");
-    ros::param::param<bool>("~aco/default_state",aco_,false);
+    ros::param::param<std::string>("~arm_planning/aco/link",aco_link_,"/arm_7_link");
+    ros::param::param<bool>("~arm_planning/aco/default_state",aco_,false);
 
-    ros::param::param<std::string>("~end_eff_link",end_eff_link_,"/sdh_palm_link");
+    ros::param::param<std::string>("~arm_planning/end_eff_link",end_eff_link_,"/sdh_palm_link");
 
     ROS_INFO("Using %s frame as world frame",collision_objects_frame_id_.c_str());
 
@@ -82,10 +78,9 @@ CArmManipulationEditor::CArmManipulationEditor(planning_scene_utils::PlanningSce
     if (spacenav.min_val_th_ > 0.5) spacenav.min_val_th_ = 0.5;
     if (spacenav.min_val_th_ < 0.0) spacenav.min_val_th_ = 0.0;
 
-    ros::param::param<bool>("~joint_controls",joint_controls_,false);
+    ros::param::param<bool>("~arm_planning/joint_controls",joint_controls_,false);
 
-    // TODO rename it - it's not just for spacenav
-    spacenav_timer_ = nh_.createTimer(ros::Duration(0.05),&CArmManipulationEditor::timerCallback,this);
+    state_timer_ = nh_.createTimer(ros::Duration(0.05),&CArmManipulationEditor::timerCallback,this);
 
     if (use_spacenav_) {
 
@@ -95,7 +90,11 @@ CArmManipulationEditor::CArmManipulationEditor(planning_scene_utils::PlanningSce
 		offset_sub_ = nh_.subscribe("/spacenav/offset",1,&CArmManipulationEditor::spacenavOffsetCallback,this);
 		rot_offset_sub_ = nh_.subscribe("/spacenav/rot_offset",1,&CArmManipulationEditor::spacenavRotOffsetCallback,this);
 
+		// 100 hz -> publishing TF
 		if (spacenav.use_rviz_cam_) tf_timer_ = nh_.createTimer(ros::Duration(0.01),&CArmManipulationEditor::tfTimerCallback,this);
+
+		// 30 Hz -> reading spacenav position
+		spacenav_timer_ = nh_.createTimer(ros::Duration(0.03),&CArmManipulationEditor::spacenavCallback,this);
 
     }
 
@@ -122,7 +121,7 @@ bool CArmManipulationEditor::transf(std::string target_frame,geometry_msgs::Pose
 	// transform pose of camera into world
 	try {
 
-			if (tfl_->waitForTransform(target_frame, pose.header.frame_id, pose.header.stamp, ros::Duration(2.0))) {
+			if (tfl_->waitForTransform(target_frame, pose.header.frame_id, pose.header.stamp, ros::Duration(0.5))) {
 
 			  tfl_->transformPose(target_frame,pose,pose);
 
@@ -135,6 +134,8 @@ bool CArmManipulationEditor::transf(std::string target_frame,geometry_msgs::Pose
 
 	} catch(tf::TransformException& ex){
 	   std::cerr << "Transform error: " << ex.what() << std::endl;
+
+	   ROS_ERROR("Exception on TF transf.: %s",ex.what());
 
 	   return false;
 	}
@@ -225,7 +226,8 @@ void CArmManipulationEditor::processSpaceNav() {
 
 	}
 
-	boost::mutex::scoped_lock(im_server_mutex_);
+	//boost::mutex::scoped_lock(im_server_mutex_);
+	//lockScene();
 
 	ROS_INFO_ONCE("Getting gripper IM");
 
@@ -239,9 +241,12 @@ void CArmManipulationEditor::processSpaceNav() {
 		ROS_ERROR_ONCE("Can't get gripper IM pose.");
 
 		//im_server_mutex_.unlock();
+		//unlockScene();
 		return;
 
 	}
+
+	//unlockScene();
 
 	//im_server_mutex_.unlock();
 
@@ -257,7 +262,7 @@ void CArmManipulationEditor::processSpaceNav() {
 		//std::cout << marker.header.frame_id << std::endl;
 
 		npose.pose = marker.pose;
-		npose.header.stamp = ros::Time(0);
+		npose.header.stamp = /*ros::Time::now();*/ ros::Time(0);
 		npose.header.frame_id = world_frame_;
 
 		if (!transf(spacenav.rviz_cam_link_ + "_add",npose)) return;
@@ -276,9 +281,32 @@ void CArmManipulationEditor::processSpaceNav() {
 
 		double th = spacenav.max_val_ * spacenav.min_val_th_;
 
-		if (fabs(offset.x) > th) npose.pose.position.x += (offset.x/spacenav.max_val_)*spacenav.step_;
-		if (fabs(offset.y) > th) npose.pose.position.y += (offset.y/spacenav.max_val_)*spacenav.step_;
-		if (fabs(offset.z) > th) npose.pose.position.z += (offset.z/spacenav.max_val_)*spacenav.step_;
+		if (fabs(offset.x) > th) {
+
+			double nv = offset.x/spacenav.max_val_; // normalized value
+			double ss = (fabs(nv) + 0.2)/1.2; // 0.16 - 1.0
+
+			npose.pose.position.x += nv*spacenav.step_*ss;
+
+		}
+
+		if (fabs(offset.y) > th) {
+
+			double nv = offset.y/spacenav.max_val_; // normalized value
+			double ss = (fabs(nv) + 0.2)/1.2; // 0.16 - 1.0
+
+			npose.pose.position.y += nv*spacenav.step_*ss;
+
+		}
+
+		if (fabs(offset.z) > th) {
+
+			double nv = offset.z/spacenav.max_val_; // normalized value
+			double ss = (fabs(nv) + 0.2)/1.2; // 0.16 - 1.0
+
+			npose.pose.position.z += nv*spacenav.step_*ss;
+
+		}
 
 	}
 
@@ -298,7 +326,10 @@ void CArmManipulationEditor::processSpaceNav() {
 
 		if (fabs(rot_offset.x) > th)  {
 
-			rpy.x += (rot_offset.x/spacenav.max_val_)*spacenav.rot_step_;
+			double nv = rot_offset.x/spacenav.max_val_;
+			double ss = (fabs(nv) + 0.2)/1.2; // 0.16 - 1.0
+
+			rpy.x += nv*spacenav.rot_step_*ss;
 			normAngle(rpy.x);
 
 			//ROS_DEBUG("Gripper current ROLL (x): %f, new one: %f (DEG)",(old_rpy.x/(2*M_PI))*360,(rpy.x/(2*M_PI))*360);
@@ -307,7 +338,10 @@ void CArmManipulationEditor::processSpaceNav() {
 
 		if (fabs(rot_offset.y) > th)  {
 
-			rpy.y += (rot_offset.y/spacenav.max_val_)*spacenav.rot_step_;
+			double nv = rot_offset.y/spacenav.max_val_;
+			double ss = (fabs(nv) + 0.2)/1.2; // 0.16 - 1.0
+
+			rpy.y += nv*spacenav.rot_step_*ss;
 			normAngle(rpy.y);
 
 			//ROS_DEBUG("Gripper current PITCH (y): %f, new one: %f (DEG)",(old_rpy.y/(2*M_PI))*360,(rpy.y/(2*M_PI))*360);
@@ -316,7 +350,10 @@ void CArmManipulationEditor::processSpaceNav() {
 
 		if (fabs(rot_offset.z) > th)  {
 
-			rpy.z += (rot_offset.z/spacenav.max_val_)*spacenav.rot_step_;
+			double nv = rot_offset.z/spacenav.max_val_;
+			double ss = (fabs(nv) + 0.2)/1.2; // 0.16 - 1.0
+
+			rpy.z += nv*spacenav.rot_step_*ss;
 			normAngle(rpy.z);
 
 			//ROS_DEBUG("Gripper current YAW (z): %f, new one: %f (DEG)",(old_rpy.z/(2*M_PI))*360,(rpy.z/(2*M_PI))*360);
@@ -367,7 +404,7 @@ void CArmManipulationEditor::tfTimerCallback(const ros::TimerEvent& ev) {
 
 	//boost::mutex::scoped_lock(im_server_mutex_);
 	//im_server_mutex_.lock();
-	lockScene();
+	//lockScene();
 
 	visualization_msgs::InteractiveMarker marker;
 	//geometry_msgs::Pose new_pose;
@@ -376,14 +413,14 @@ void CArmManipulationEditor::tfTimerCallback(const ros::TimerEvent& ev) {
 
 		ROS_ERROR_ONCE("Can't get gripper IM pose.");
 		//im_server_mutex_.unlock();
-		unlockScene();
+		//unlockScene();
 
 		return;
 
 	}
 
 	//im_server_mutex_.unlock();
-	unlockScene();
+	//unlockScene();
 
 	ros::Time now = /*ros::Time(0);*/ ros::Time::now(); /*marker.header.stamp;*/
 
@@ -426,7 +463,14 @@ void CArmManipulationEditor::tfTimerCallback(const ros::TimerEvent& ev) {
 
 }
 
-// general timer, 20 Hz
+void CArmManipulationEditor::spacenavCallback(const ros::TimerEvent& ev) {
+
+	// update position of IM according to spacenav data
+    processSpaceNav();
+
+}
+
+// general timer, 20 Hz, publishes state of the node
 void CArmManipulationEditor::timerCallback(const ros::TimerEvent& ev) {
 
 	ROS_INFO_ONCE("Assisted arm nav timer callback triggered.");
@@ -496,9 +540,6 @@ void CArmManipulationEditor::timerCallback(const ros::TimerEvent& ev) {
 
 
 	arm_nav_state_pub_.publish(msg);
-
-	// update position of IM according to spacenav data
-	if (use_spacenav_) processSpaceNav();
 
 }
 
@@ -746,6 +787,13 @@ void CArmManipulationEditor::reset() {
 
   }
 
+  if (ros::service::exists("sn_teleop_srv_en",true)) {
+
+  	   std_srvs::Empty srv;
+  	   ros::service::call("sn_teleop_srv_en",srv);
+
+     }
+
 
   inited = false;
 
@@ -767,12 +815,17 @@ bool CArmManipulationEditor::refresh() {
 void CArmManipulationEditor::spin_callback(const ros::TimerEvent&)
 {
 
-  if (inited==true) sendMarkers();
+  if (inited==true) {
+
+	  ROS_INFO_ONCE("Sending markers");
+	  sendMarkers();
+
+  }
 
 
 }
 
-void CArmManipulationEditor::findIK(geometry_msgs::Pose new_pose)
+bool CArmManipulationEditor::findIK(geometry_msgs::Pose new_pose)
 {
 
   tf::Transform pose = toBulletTransform(new_pose);
@@ -788,18 +841,22 @@ void CArmManipulationEditor::findIK(geometry_msgs::Pose new_pose)
 
 	  if(motion_plan_map_[getMotionPlanRequestNameFromId(mpr_id)].hasGoodIKSolution(type))
       {
-        motion_plan_map_[getMotionPlanRequestNameFromId(mpr_id)].refreshColors();
+      motion_plan_map_[getMotionPlanRequestNameFromId(mpr_id)].refreshColors();
       }
       motion_plan_map_[getMotionPlanRequestNameFromId(mpr_id)].setHasGoodIKSolution(false, type);
+
+      return true;
 
   } else {
 
       if(!motion_plan_map_[getMotionPlanRequestNameFromId(mpr_id)].hasGoodIKSolution(type))
       {
-        motion_plan_map_[getMotionPlanRequestNameFromId(mpr_id)].refreshColors();
+      motion_plan_map_[getMotionPlanRequestNameFromId(mpr_id)].refreshColors();
       }
 
       motion_plan_map_[getMotionPlanRequestNameFromId(mpr_id)].setHasGoodIKSolution(true, type);
+
+      return false;
 
     }
 
@@ -834,11 +891,11 @@ geometry_msgs::Vector3 CArmManipulationEditor::GetAsEuler(geometry_msgs::Quatern
 void CArmManipulationEditor::GripperPosesClean() {
 
   //boost::mutex::scoped_lock(im_server_mutex_);
-  lockScene();
+  //lockScene();
 
   gripper_poses_->clear();
 
-  unlockScene();
+  //unlockScene();
 
 }
 
@@ -857,7 +914,7 @@ void CArmManipulationEditor::GripperPoses()
     if (inited==true && disable_gripper_poses_==false) {
 
       //boost::mutex::scoped_lock(im_server_mutex_);
-      lockScene();
+      //lockScene();
 
       if (interactive_marker_server_->get("MPR 0_end_control",marker)) {
 
@@ -930,7 +987,7 @@ void CArmManipulationEditor::GripperPoses()
 
          }
 
-        unlockScene();
+        //unlockScene();
 
       } else ROS_ERROR("Can't get pose of gripper IM");
 
@@ -1069,6 +1126,7 @@ int main(int argc, char** argv)
       ros::ServiceServer service_repeat = n.advertiseService(SRV_REPEAT, &CArmManipulationEditor::ArmNavRepeat,ps_editor);
 
       ros::ServiceServer service_collobj = n.advertiseService(SRV_COLLOBJ, &CArmManipulationEditor::ArmNavCollObj,ps_editor);
+      ros::ServiceServer service_collobj_rem = n.advertiseService(SRV_COLLOBJ_REM, &CArmManipulationEditor::ArmNavRemoveCollObjects,ps_editor);
       ros::ServiceServer service_setattached = n.advertiseService(SRV_SET_ATTACHED, &CArmManipulationEditor::ArmNavSetAttached,ps_editor);
       ros::ServiceServer service_movepalmlink = n.advertiseService(SRV_MOVE_PALM_LINK, &CArmManipulationEditor::ArmNavMovePalmLink,ps_editor);
       ros::ServiceServer service_movepalmlinkrel = n.advertiseService(SRV_MOVE_PALM_LINK_REL, &CArmManipulationEditor::ArmNavMovePalmLinkRel,ps_editor);
@@ -1078,7 +1136,7 @@ int main(int argc, char** argv)
       ros::ServiceServer service_step = n.advertiseService(SRV_STEP, &CArmManipulationEditor::ArmNavStep,ps_editor);
       ros::ServiceServer service_stop = n.advertiseService(SRV_STOP, &CArmManipulationEditor::ArmNavStop,ps_editor);
 
-      ros::Timer timer1 = n.createTimer(ros::Duration(0.5), &CArmManipulationEditor::spin_callback,ps_editor);
+      ros::Timer timer1 = n.createTimer(ros::Duration(0.25), &CArmManipulationEditor::spin_callback,ps_editor);
 
       ManualArmManipActionServer act_server(ACT_ARM_MANIP);
 
@@ -1088,11 +1146,11 @@ int main(int argc, char** argv)
       double tmp;
 
       ros::param::param<double>("~start_timeout",tmp,START_TIMEOUT);
-      if (tmp>0) act_server.start_timeout_ = ros::Duration(tmp);
+      if (tmp >= 0.0) act_server.start_timeout_ = ros::Duration(tmp);
       else act_server.start_timeout_ = ros::Duration(START_TIMEOUT);
 
       ros::param::param<double>("~solve_timeout",tmp,SOLVE_TIMEOUT);
-      if (tmp>0) act_server.solve_timeout_ = ros::Duration(tmp);
+      if (tmp >= 0.0) act_server.solve_timeout_ = ros::Duration(tmp);
       else act_server.solve_timeout_ = ros::Duration(SOLVE_TIMEOUT);
 
       ros::param::param<double>("~inflate_bb",tmp,INFLATE_BB);
@@ -1113,7 +1171,7 @@ int main(int argc, char** argv)
       ROS_INFO("Spinning");
 
       //ros::spin();
-      ros::AsyncSpinner spinner(4);
+      ros::AsyncSpinner spinner(6);
       spinner.start();
       ros::waitForShutdown();
 
