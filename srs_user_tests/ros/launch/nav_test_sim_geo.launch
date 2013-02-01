@@ -28,15 +28,10 @@
 		<include file="$(find cob_interactive_teleop)/launch/interactive_teleop.launch"/>
         
 		<!-- Run BUT dynamic scene model server node -->
-		<include file="$(find srs_env_model)/launch/but_envmodel_robot.launch">
-  		<arg name="points_in" value="/cam3d_throttled/depth_registered/points_noised"/>
+		<include file="$(find cob_3d_mapping_pipeline)/launch/mapping.launch">
+  		<arg name="points_in" value="/cam3d_throttled/depth_registered/points"/>
 		</include>
 
-		<!-- Run BUT plane detection node -->
-		<!--include file="$(find srs_env_model_percp)/launch/but_planedet_robot.launch" /-->
-	
-	<!-- Load predefined voxel map -->
-	<include file="$(find srs_user_tests)/ros/launch/load_octomap.launch" />
 	
 	<node pkg="srs_user_tests" type="prepare_robot_sim.py" name="prepare_robot_sim" output="screen"/>
 
