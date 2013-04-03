@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<launch>
+
+  <!-- args for specifying test -->
+  <arg name="exp"/>
+  <arg name="task"/>
+  <arg name="cond"/>
+  <arg name="sim" default="false"/>
+  <arg name="log" default="true"/>
+  <arg name="id"/> <!-- ID of participant -->
+  
+  <arg name="pc1" default="cob3-3-pc1"/>
+	<arg name="pc2" default="cob3-3-pc2"/>
+	<arg name="pc3" default="cob3-3-pc3"/>
+  
+  <!-- robot args -->
+	<arg name="robot" default="$(optenv ROBOT !!NO_ROBOT_SET!!)"/>
+  <arg name="robot_env" default="$(optenv ROBOT_ENV !!NO_ROBOT_ENV_SET!!)"/>
+  
+  <!-- in case of a simulation, run Gazebo etc. -->
+  <group if="$(arg sim)">
+  
+    <include file="$(find cob_default_robot_config)/upload_param.launch" />
+    <include file="$(find cob_default_env_config)/upload_param.launch" />
+
+    <param name="/use_sim_time" value="true" />
+
+    <include file="$(find cob_bringup_sim)/launch/robot.launch"/>
+  
+    <!-- this is adding some noise to simulated kinect data -->
+    <include file="$(find srs_env_model_utils)/launch/kinect_noise_generator.launch">
+      <arg name="input_topic" value="/cam3d_throttled/depth_registered/points"/>
+      <arg name="output_topic" value="/cam3d_throttled/depth_registered/points_noised"/>
+    </include>
+
+    <!-- in case of simulation, start localization automatically -->
+    <include file="$(find srs_user_tests)/ros/launch/run_localization.launch">
+      <arg name="sim"  value="$(arg sim)"/>
+    </include>
+  
+  </group>
+  
+  
+  <group>
+  
+    <!-- run on PC1 -->
+    <machine name="pc1" address="$(arg pc1)" default="true" unless="$(arg sim)"/>
+	
+	</group>
+	
+	<group>
+	
+	  <!-- run other stuff on PC3 -->
+    <machine name="pc3" address="$(arg pc3)" default="true" unless="$(arg sim)"/>
+	
+	  <!-- include experiment specific launch file -->
+	  <include file="$(find srs_user_tests)/ros/config/$(arg exp)/exp.xml">
+	    <arg name="exp"  value="$(arg exp)"/>
+      <arg name="task" value="$(arg task)"/>
+      <arg name="cond" value="$(arg cond)"/>
+      <arg name="sim"  value="$(arg sim)"/>
+	  </include>
+	
+	</group>
+
+  <!-- logging -->
+  <group if="$(arg log)">
+  
+    <machine name="pc2" address="$(arg pc2)" default="true" unless="$(arg sim)"/>
+
+    <node name="logger" pkg="srs_user_tests" type="topics_bag.py" output="screen">
+      <rosparam file="$(find srs_user_tests)/ros/config/$(arg exp)/bag_record.yaml" command="load" />
+      <param name="bag_path" value="logs/$(arg id)/$(arg exp)/$(arg task)/$(arg cond)/"/>
+    </node>
+  
+  </group>
+
+	<machine name="pc1" address="$(arg pc1)" default="true" unless="$(arg sim)"/>
+	
+</launch>

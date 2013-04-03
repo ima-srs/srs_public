@@ -53,155 +53,261 @@ Primitive::Primitive(InteractiveMarkerServerPtr server, string frame_id, string 
   color_green_a01_.g = 1.0;
   color_green_a01_.b = 0.0;
   color_green_a01_.a = 0.1;
+
+  scale_saved_ = 0;
 }
 
 void Primitive::defaultCallback(const InteractiveMarkerFeedbackConstPtr &feedback)
 {
-  if (feedback->event_type == InteractiveMarkerFeedback::MOUSE_UP)
-  {
-    pose_change.position.x -= feedback->pose.position.x;
-    pose_change.position.y -= feedback->pose.position.y;
-    pose_change.position.z -= feedback->pose.position.z;
-    pose_change.orientation.x -= feedback->pose.orientation.x;
-    pose_change.orientation.y -= feedback->pose.orientation.y;
-    pose_change.orientation.z -= feedback->pose.orientation.z;
-    pose_change.orientation.w -= feedback->pose.orientation.w;
+	// Update the scale marker positions
+	if( scale_saved_ > 1 )
+	{
+		Vector3 scale_change;
+		scale_change.x = scale_.x - scale_prev_.x;
+		scale_change.y = scale_.y - scale_prev_.y;
+		scale_change.z = scale_.z - scale_prev_.z;
+		scale_saved_ = 0;
 
-    if (frame_id_ != feedback->header.frame_id)
-    {
-      try
-      {
-        tfListener = new tf::TransformListener();
-        tfListener->waitForTransform(feedback->header.frame_id, frame_id_, feedback->header.stamp, ros::Duration(0.2));
-        tfListener->lookupTransform(feedback->header.frame_id, frame_id_, feedback->header.stamp,
-                                    feedbackToDefaultTransform);
-        delete tfListener;
-        transformer.setTransform(feedbackToDefaultTransform);
+		updatePublisher_->publishScaleChanged(scale_, scale_change);
 
-        btVector3 position;
-        position.setX(feedback->pose.position.x);
-        position.setY(feedback->pose.position.y);
-        position.setZ(feedback->pose.position.z);
-        btQuaternion orientation;
-        orientation.setX(feedback->pose.orientation.x);
-        orientation.setY(feedback->pose.orientation.y);
-        orientation.setZ(feedback->pose.orientation.z);
-        orientation.setW(feedback->pose.orientation.w);
+		removeScaleControls();
+		addScaleControls();
 
-        tf::Stamped<btTransform> pose;
-        pose.setOrigin(position);
-        pose.setRotation(orientation);
-        pose.frame_id_ = feedback->header.frame_id;
-        transformer.transformPose(frame_id_, pose, pose);
+		server_->applyChanges();
+	}
 
-        pose_.position.x = pose.getOrigin().getX();
-        pose_.position.y = pose.getOrigin().getY();
-        pose_.position.z = pose.getOrigin().getZ();
-        pose_.orientation.x = pose.getRotation().getX();
-        pose_.orientation.y = pose.getRotation().getY();
-        pose_.orientation.z = pose.getRotation().getZ();
-        pose_.orientation.w = pose.getRotation().getW();
+	// Process the feedback
+	if (feedback->event_type == InteractiveMarkerFeedback::MOUSE_UP)
+	{
+		geometry_msgs::Pose npose = feedback->pose;
+		if (frame_id_ != feedback->header.frame_id)
+		{
+			//ROS_INFO("Different frame ids");
+			try
+			{
+				tfListener = new tf::TransformListener();
+				tfListener->waitForTransform(feedback->header.frame_id, frame_id_, feedback->header.stamp, ros::Duration(2.0));
+				tfListener->lookupTransform(feedback->header.frame_id, frame_id_, feedback->header.stamp, feedbackToDefaultTransform);
+				delete tfListener;
+				transformer.setTransform(feedbackToDefaultTransform);
 
-      }
-      catch (tf::TransformException& ex)
-      {
-        ROS_WARN("Transform error!");
-        delete tfListener;
-        return;
-      }
-    }
-    else
-    {
-      pose_ = feedback->pose;
-    }
+				btVector3 position;
+				position.setX(feedback->pose.position.x);
+				position.setY(feedback->pose.position.y);
+				position.setZ(feedback->pose.position.z);
 
-    insert();
-    server_->applyChanges();
+				btQuaternion orientation;
+				orientation.setX(feedback->pose.orientation.x);
+				orientation.setY(feedback->pose.orientation.y);
+				orientation.setZ(feedback->pose.orientation.z);
+				orientation.setW(feedback->pose.orientation.w);
 
-    updatePublisher_->publishPoseChanged(feedback->pose, pose_change);
-  }
+				tf::Stamped<btTransform> pose;
+				pose.setOrigin(position);
+				pose.setRotation(orientation);
+				pose.frame_id_ = feedback->header.frame_id;
+				transformer.transformPose(frame_id_, pose, pose);
 
+				npose.position.x = pose.getOrigin().getX();
+				npose.position.y = pose.getOrigin().getY();
+				npose.position.z = pose.getOrigin().getZ();
+				npose.orientation.x = pose.getRotation().getX();
+				npose.orientation.y = pose.getRotation().getY();
+				npose.orientation.z = pose.getRotation().getZ();
+				npose.orientation.w = pose.getRotation().getW();
+			}
+			catch (tf::TransformException& ex)
+			{
+				ROS_WARN("Transform error!");
+				delete tfListener;
+				return;
+			}
+		}
+
+		// Calculate the pose change in the frame_id_
+		pose_change.position = npose.position;
+		pose_change.position.x -= pose_.position.x;
+		pose_change.position.y -= pose_.position.y;
+		pose_change.position.z -= pose_.position.z;
+
+		btQuaternion orientation(pose_.orientation.x,
+								 pose_.orientation.y,
+								 pose_.orientation.z,
+								 pose_.orientation.w);
+		orientation.inverse();
+		orientation *= btQuaternion(npose.orientation.x,
+				                    npose.orientation.y,
+								    npose.orientation.z,
+								    npose.orientation.w);
+
+		pose_change.orientation.x = orientation.getX();
+		pose_change.orientation.y = orientation.getY();
+		pose_change.orientation.z = orientation.getZ();
+		pose_change.orientation.w = orientation.getW();
+
+		// Store the new position
+		pose_ = npose;
+
+		insert();
+		server_->applyChanges();
+
+		// Majkl: Why the pose changed was published in the message frame ID and not in the IM's one?
+		//    updatePublisher_->publishPoseChanged(feedback->pose, pose_change);
+		updatePublisher_->publishPoseChanged(pose_, pose_change);
+	}
 }
 
 void Primitive::scaleFeedback(const visualization_msgs::InteractiveMarkerFeedbackConstPtr &feedback)
 {
-  static Vector3 scale_change;
+	btVector3 center(pose_.position.x, pose_.position.y, pose_.position.z);
+	btQuaternion orient(pose_.orientation.x, pose_.orientation.y, pose_.orientation.z, pose_.orientation.w);
 
-  int modificator = 0;
-  if (feedback->marker_name == name_ + "_min_x")
-  {
-    min_size_.x = feedback->pose.position.x;
-    modificator = -1;
-  }
-  else if (feedback->marker_name == name_ + "_max_x")
-  {
-    max_size_.x = feedback->pose.position.x;
-    modificator = 1;
-  }
-  else if (feedback->marker_name == name_ + "_min_y")
-  {
-    min_size_.y = feedback->pose.position.y;
-    modificator = -1;
-  }
-  else if (feedback->marker_name == name_ + "_max_y")
-  {
-    max_size_.y = feedback->pose.position.y;
-    modificator = 1;
-  }
-  else if (feedback->marker_name == name_ + "_min_z")
-  {
-    min_size_.z = feedback->pose.position.z;
-    modificator = -1;
-  }
-  else if (feedback->marker_name == name_ + "_max_z")
-  {
-    max_size_.z = feedback->pose.position.z;
-    modificator = 1;
-  }
+	if (feedback->event_type == InteractiveMarkerFeedback::MOUSE_DOWN)
+	{
+		scale_prev_.x = scale_.x;
+		scale_prev_.y = scale_.y;
+		scale_prev_.z = scale_.z;
+		scale_saved_ = 1;
+	}
+	else if (feedback->event_type == InteractiveMarkerFeedback::MOUSE_UP && scale_saved_ > 0)
+	{
+		Vector3 scale_change;
+		scale_change.x = scale_.x - scale_prev_.x;
+		scale_change.y = scale_.y - scale_prev_.y;
+		scale_change.z = scale_.z - scale_prev_.z;
+		scale_saved_ = 0;
 
-  Vector3 ds;
-  ds.x = ((max_size_.x - min_size_.x) - scale_.x);
-  ds.y = ((max_size_.y - min_size_.y) - scale_.y);
-  ds.z = ((max_size_.z - min_size_.z) - scale_.z);
+		updatePublisher_->publishScaleChanged(scale_, scale_change);
 
-  scale_.x = max_size_.x - min_size_.x;
-  scale_.y = max_size_.y - min_size_.y;
-  scale_.z = max_size_.z - min_size_.z;
-  if (scale_.x < 0.0)
-    scale_.x = 0.001;
-  else
-    pose_.position.x += 0.5 * ds.x * modificator;
-  if (scale_.y < 0.0)
-    scale_.y = 0.001;
-  else
-    pose_.position.y += 0.5 * ds.y * modificator;
-  if (scale_.z < 0.0)
-    scale_.z = 0.001;
-  else
-    pose_.position.z += 0.5 * ds.z * modificator;
+		removeScaleControls();
+		addScaleControls();
 
-  object_.pose = pose_;
-  if ((object_.controls.size() > 0) && (object_.controls[0].markers.size() > 0))
-    object_.controls[0].markers[0].scale = scale_;
-  object_.scale = srs_interaction_primitives::maxScale(scale_);
+		server_->applyChanges();
+	}
+	else if (feedback->event_type == InteractiveMarkerFeedback::POSE_UPDATE  && scale_saved_ > 0)
+	{
+		++scale_saved_;
 
-  updateControls();
+		geometry_msgs::Pose npose = feedback->pose;
+		if( frame_id_ != feedback->header.frame_id )
+		{
+//		  ROS_INFO("different frame");
+		  try
+		  {
+			tfListener = new tf::TransformListener();
+			tfListener->waitForTransform(feedback->header.frame_id, frame_id_, feedback->header.stamp, ros::Duration(2.0));
+			tfListener->lookupTransform(feedback->header.frame_id, frame_id_, feedback->header.stamp, feedbackToDefaultTransform);
+			delete tfListener;
+			transformer.setTransform(feedbackToDefaultTransform);
 
-  server_->insert(object_);
-  menu_handler_.reApply(*server_);
-  server_->applyChanges();
+			btVector3 position;
+			position.setX(feedback->pose.position.x);
+			position.setY(feedback->pose.position.y);
+			position.setZ(feedback->pose.position.z);
 
-  scale_change.x += ds.x;
-  scale_change.y += ds.y;
-  scale_change.z += ds.z;
+			btQuaternion orientation;
+			orientation.setX(feedback->pose.orientation.x);
+			orientation.setY(feedback->pose.orientation.y);
+			orientation.setZ(feedback->pose.orientation.z);
+			orientation.setW(feedback->pose.orientation.w);
 
-  if (feedback->event_type == InteractiveMarkerFeedback::MOUSE_UP)
-  {
-    updatePublisher_->publishScaleChanged(scale_, scale_change);
-    scale_change.x = 0;
-    scale_change.y = 0;
-    scale_change.z = 0;
-  }
+			tf::Stamped<btTransform> pose;
+			pose.setOrigin(position);
+			pose.setRotation(orientation);
+			pose.frame_id_ = feedback->header.frame_id;
+			transformer.transformPose(frame_id_, pose, pose);
+
+			npose.position.x = pose.getOrigin().getX();
+			npose.position.y = pose.getOrigin().getY();
+			npose.position.z = pose.getOrigin().getZ();
+			npose.orientation.x = pose.getRotation().getX();
+			npose.orientation.y = pose.getRotation().getY();
+			npose.orientation.z = pose.getRotation().getZ();
+			npose.orientation.w = pose.getRotation().getW();
+		  }
+		  catch (tf::TransformException& ex)
+		  {
+			ROS_WARN("Transform error!");
+			delete tfListener;
+			return;
+		  }
+		}
+
+		btVector3 position(npose.position.x, npose.position.y, npose.position.z);
+		btVector3 vec = position - center;
+		double size = vec.length();
+
+		btVector3 rotated = quatRotate(orient, btVector3(1, 0, 0));
+		int xsign = 1;
+		if( rotated.x() < 0 )
+		{
+			xsign = -1;
+		}
+		rotated = quatRotate(orient, btVector3(0, 1, 0));
+		int ysign = 1;
+		if( rotated.y() < 0 )
+		{
+			ysign = -1;
+		}
+		rotated = quatRotate(orient, btVector3(0, 0, 1));
+		int zsign = 1;
+		if( rotated.z() < 0 )
+		{
+			zsign = -1;
+		}
+
+		if (feedback->marker_name == name_ + "_min_x")
+		{
+			int sign = (pose_.position.x - npose.position.x) > 0.0 ? 1 : -1;
+			scale_.x = scale_prev_.x + xsign * sign * size;
+//			scale_.x = scale_prev_.x + xsign * (pose_.position.x - npose.position.x);
+		}
+		else if (feedback->marker_name == name_ + "_max_x")
+		{
+			int sign = (npose.position.x - pose_.position.x) > 0.0 ? 1 : -1;
+			scale_.x = scale_prev_.x + xsign * sign * size;
+//			scale_.x = scale_prev_.x + xsign * (npose.position.x - pose_.position.x);
+		}
+		else if (feedback->marker_name == name_ + "_min_y")
+		{
+			int sign = (pose_.position.y - npose.position.y) > 0.0 ? 1 : -1;
+			scale_.y = scale_prev_.y + ysign * sign * size;
+//			scale_.y = scale_prev_.y + ysign * (pose_.position.y - npose.position.y);
+		}
+		else if (feedback->marker_name == name_ + "_max_y")
+		{
+			int sign = (npose.position.y - pose_.position.y) > 0.0 ? 1 : -1;
+			scale_.y = scale_prev_.y + ysign * sign * size;
+//			scale_.y = scale_prev_.y + ysign * (npose.position.y - pose_.position.y);
+		}
+		else if (feedback->marker_name == name_ + "_min_z")
+		{
+			int sign = (pose_.position.z - npose.position.z) > 0.0 ? 1 : -1;
+			scale_.z = scale_prev_.z + zsign * sign * size;
+//			scale_.z = scale_prev_.z + zsign * (pose_.position.z - npose.position.z);
+		}
+		else if (feedback->marker_name == name_ + "_max_z")
+		{
+			int sign = (npose.position.z - pose_.position.z) > 0.0 ? 1 : -1;
+			scale_.z = scale_prev_.z + zsign * sign * size;
+//			scale_.z = scale_prev_.z + zsign * (npose.position.z - pose_.position.z);
+		}
+
+		if (scale_.x < 0.0) scale_.x = 0.001;
+		if (scale_.y < 0.0) scale_.y = 0.001;
+		if (scale_.z < 0.0) scale_.z = 0.001;
+
+		if ((object_.controls.size() > 0) && (object_.controls[0].markers.size() > 0))
+		{
+			object_.controls[0].markers[0].scale = scale_;
+		}
+		object_.scale = SCALE_COEFF * srs_interaction_primitives::maxScale(scale_);
+
+		updateControls();
+
+		insert();
+		server_->applyChanges();
+	}
 }
 
 InteractiveMarkerControl* Primitive::getControl(string name)
@@ -232,6 +338,7 @@ void Primitive::addMovementControls()
   show_movement_control_ = true;
 
   moveXControl_.name = "move_x";
+//  moveXControl_.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, 0, 0);
   moveXControl_.orientation.w = 1;
   moveXControl_.orientation.x = 1;
   moveXControl_.orientation.y = 0;
@@ -239,6 +346,7 @@ void Primitive::addMovementControls()
   moveXControl_.interaction_mode = InteractiveMarkerControl::MOVE_AXIS;
 
   moveYControl_.name = "move_y";
+//  moveYControl_.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, 0, 0.5 * M_PI);
   moveYControl_.orientation.w = 1;
   moveYControl_.orientation.x = 0;
   moveYControl_.orientation.y = 0;
@@ -246,6 +354,7 @@ void Primitive::addMovementControls()
   moveYControl_.interaction_mode = InteractiveMarkerControl::MOVE_AXIS;
 
   moveZControl_.name = "move_z";
+//  moveZControl_.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, -0.5 * M_PI, 0);
   moveZControl_.orientation.w = 1;
   moveZControl_.orientation.x = 0;
   moveZControl_.orientation.y = 1;
@@ -262,6 +371,7 @@ void Primitive::addRotationControls()
   show_rotation_control_ = true;
 
   rotateXControl_.name = "rotate_x";
+//  rotateXControl_.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, 0, 0);
   rotateXControl_.orientation.w = 1;
   rotateXControl_.orientation.x = 1;
   rotateXControl_.orientation.y = 0;
@@ -269,6 +379,7 @@ void Primitive::addRotationControls()
   rotateXControl_.interaction_mode = InteractiveMarkerControl::ROTATE_AXIS;
 
   rotateYControl.name = "rotate_y";
+//  rotateYControl.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, 0, 0.5 * M_PI);
   rotateYControl.orientation.w = 1;
   rotateYControl.orientation.x = 0;
   rotateYControl.orientation.y = 0;
@@ -276,6 +387,7 @@ void Primitive::addRotationControls()
   rotateYControl.interaction_mode = InteractiveMarkerControl::ROTATE_AXIS;
 
   rotateZControl_.name = "rotate_z";
+//  moveZControl_.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, -0.5 * M_PI, 0);
   rotateZControl_.orientation.w = 1;
   rotateZControl_.orientation.x = 0;
   rotateZControl_.orientation.y = 1;
@@ -476,7 +588,7 @@ void Primitive::addScaleControls()
       InteractiveMarker int_marker;
       int_marker.header.frame_id = frame_id_;
 //      int_marker.scale = 1.0;
-      int_marker.scale = 0.5 * srs_interaction_primitives::maxScale(scale_);
+      int_marker.scale = 0.6 * srs_interaction_primitives::maxScale(scale_);
       int_marker.pose = pose_;
 
       InteractiveMarkerControl control;
@@ -484,38 +596,37 @@ void Primitive::addScaleControls()
       control.orientation_mode = InteractiveMarkerControl::INHERIT;
       control.always_visible = false;
 
-      control.orientation.w = 1;
-
       switch (axis)
       {
         case 0:
           int_marker.name = sign > 0 ? name_ + "_max_x" : name_ + "_min_x";
-          int_marker.pose.position.x = sign > 0 ? max_size_.x : min_size_.x;
-          int_marker.pose.position.z = sign > 0 ? max_size_.z : min_size_.z;
+//          control.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, 0, 0);
+          control.orientation.w = 1;
           control.orientation.x = 1;
           control.orientation.y = 0;
           control.orientation.z = 0;
           break;
         case 1:
           int_marker.name = sign > 0 ? name_ + "_max_y" : name_ + "_min_y";
-          int_marker.pose.position.y = sign > 0 ? max_size_.y : min_size_.y;
-          int_marker.pose.position.x = sign > 0 ? max_size_.x : min_size_.x;
+//          control.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, 0, 0.5 * M_PI);
+          control.orientation.w = 1;
           control.orientation.x = 0;
           control.orientation.y = 0;
           control.orientation.z = 1;
           break;
         default:
-          int_marker.name = sign > 0 ? name_ + "_max_z" : name_ + "_min_z";
-          int_marker.pose.position.z = sign > 0 ? max_size_.z : min_size_.z;
-          int_marker.pose.position.y = sign > 0 ? max_size_.y : min_size_.y;
+//          int_marker.name = sign > 0 ? name_ + "_max_z" : name_ + "_min_z";
+          int_marker.name = sign < 0 ? name_ + "_max_z" : name_ + "_min_z";
+//          control.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, -0.5 * M_PI, 0);
+          control.orientation.w = 1;
           control.orientation.x = 0;
-          control.orientation.y = -1;
+          control.orientation.y = 1;
           control.orientation.z = 0;
           break;
       }
 
-      makeArrow(int_marker, control, 0.5 * sign);
-      makeArrow(int_marker, control, 0.75 * sign);
+//      makeArrow(int_marker, control, 3.0 * sign);
+      makeArrow(int_marker, control, 3.5 * sign);
 
       int_marker.controls.push_back(control);
       server_->insert(int_marker, boost::bind(&Primitive::scaleFeedback, this, _1));
@@ -537,27 +648,20 @@ void Primitive::updateScaleControls()
     for (int sign = -1; sign <= 1; sign += 2)
     {
       string n;
-      Pose p = pose_;
-
       switch (axis)
       {
         case 0:
           n = sign > 0 ? name_ + "_max_x" : name_ + "_min_x";
-          p.position.x = sign > 0 ? max_size_.x : min_size_.x;
-          p.position.z = sign > 0 ? max_size_.z : min_size_.z;
           break;
         case 1:
           n = sign > 0 ? name_ + "_max_y" : name_ + "_min_y";
-          p.position.y = sign > 0 ? max_size_.y : min_size_.y;
-          p.position.x = sign > 0 ? max_size_.x : min_size_.x;
           break;
         default:
           n = sign > 0 ? name_ + "_max_z" : name_ + "_min_z";
-          p.position.z = sign > 0 ? max_size_.z : min_size_.z;
-          p.position.y = sign > 0 ? max_size_.y : min_size_.y;
           break;
       }
-      server_->setPose(n, p);
+      server_->setPose(n, pose_);
+      server_->applyChanges();
     }
   }
 }

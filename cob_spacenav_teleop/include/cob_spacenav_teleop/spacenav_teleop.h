@@ -66,6 +66,8 @@ struct Params {
     double ignore_th_high;
     double ignore_th_low;
 
+    bool unsafe_limiter;
+
 };
 
 struct SpacenavData {
@@ -89,7 +91,8 @@ struct Buttons {
 
 	bool left;
 	bool right;
-
+	bool right_last;
+	bool right_trigger;
 };
 
 

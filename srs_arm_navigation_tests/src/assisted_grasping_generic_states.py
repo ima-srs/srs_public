@@ -53,6 +53,8 @@ from arm_manip_helper_methods import *
 from simple_script_server import *
 #from cob_script_server.msg import *
 
+from cob_srvs.srv import SetJointStiffness
+
 sss = simple_script_server()
 
 
@@ -219,7 +221,7 @@ class detect_unknown_object_assisted(smach.State):
           rospy.logerr('Cannot add IM object to the scene, error: %s',str(e))
           
         # allow interaction for this object  
-        #self.hlp.set_interaction(self.unknown_object_name,True)
+        self.hlp.set_interaction(self.unknown_object_name,True)
       
     else:
         
@@ -265,6 +267,8 @@ class detect_unknown_object_assisted(smach.State):
       
   
  def add_im_for_object(self):
+     
+   global listener
    
    # /but_arm_manip/manual_bb_estimation_action
    roi_client = actionlib.SimpleActionClient('/but_arm_manip/manual_bb_estimation_action',ManualBBEstimationAction)
@@ -284,16 +288,23 @@ class detect_unknown_object_assisted(smach.State):
        add_object = rospy.ServiceProxy(self.s_add_unknown_object, AddUnknownObject)
        rospy.loginfo('Calling %s service',self.s_add_unknown_object)
     
-       bb_pose = Pose()
+       bb_pose = PoseStamped()
        
-       bb_pose.position.x = self.bb_pos_x
-       bb_pose.position.y = self.bb_pos_y
-       bb_pose.position.z = self.bb_pos_z
+       bb_pose.header.frame_id = '/base_link'
+       bb_pose.header.stamp = rospy.Time(0)
        
-       bb_pose.orientation.x = 0.0
-       bb_pose.orientation.y = 0.0
-       bb_pose.orientation.z = 0.0
-       bb_pose.orientation.w = 1.0
+       bb_pose.pose.position.x = self.bb_pos_x
+       bb_pose.pose.position.y = self.bb_pos_y
+       bb_pose.pose.position.z = self.bb_pos_z
+       
+       bb_pose.pose.orientation.x = 0.0
+       bb_pose.pose.orientation.y = 0.0
+       bb_pose.pose.orientation.z = 0.0
+       bb_pose.pose.orientation.w = 1.0
+       
+       listener.waitForTransform('/map',bb_pose.header.frame_id,bb_pose.header.stamp,rospy.Duration(10))
+       
+       bb_pose = listener.transformPose('/map',bb_pose)
        
        bb_lwh = Vector3()
        
@@ -303,11 +314,11 @@ class detect_unknown_object_assisted(smach.State):
     
        try:
             
-            add_object(frame_id='/base_link',
+            add_object(frame_id='/map',
                        name=self.unknown_object_name,
                        description=self.unknown_object_description,
                        pose_type= PoseType.POSE_BASE,
-                       pose = bb_pose,
+                       pose = bb_pose.pose,
                        scale = bb_lwh,
                        disable_material=True)
             
@@ -319,6 +330,9 @@ class detect_unknown_object_assisted(smach.State):
        except Exception, e:
           
           rospy.logerr('Cannot add IM object to the scene, error: %s',str(e))
+          
+          
+       self.hlp.set_interaction(self.unknown_object_name,True)
   
    rospy.loginfo("Waiting for result...")
    roi_client.wait_for_result()
@@ -353,6 +367,8 @@ class grasp_unknown_object_assisted(smach.State):
     self.s_coll_obj = arm_manip_ns + '/arm_nav_coll_obj'
     self.s_rem_coll_obj = arm_manip_ns + '/arm_rem_coll_obj'
     self.s_set_attached = arm_manip_ns + '/arm_nav_set_attached'
+    
+    self.s_set_stiffness = "/arm_controller/set_joint_stiffness"
    
   def add_bb_to_planning(self):
       
@@ -374,7 +390,7 @@ class grasp_unknown_object_assisted(smach.State):
                allow_collision=True,
                attached=False,
                attach_to_frame_id='',
-               allow_pregrasps=True);
+               allow_pregrasps=False);
       
     except Exception, e:
       
@@ -437,6 +453,9 @@ class grasp_unknown_object_assisted(smach.State):
     if self.hlp.wait_for_srv(self.s_set_attached) is False:
         return 'failed'
     
+    if self.hlp.wait_for_srv(self.s_set_stiffness) is False:
+        return 'failed'
+    
     self.userdata = userdata
     
     # open gripper to cylopen
@@ -449,7 +468,17 @@ class grasp_unknown_object_assisted(smach.State):
     
     # call allow grasping service
     #rospy.wait_for_service('/but_arm_manip/grasping_allow')
-        
+    
+    arm_stiff = rospy.ServiceProxy(self.s_set_stiffness,SetJointStiffness)
+    
+    rospy.loginfo("Setting arm stiffness")
+    try:
+          
+        st = arm_stiff([300,300,300,300,200,200,200])
+          
+    except Exception, e:
+          
+        rospy.logerr("Error on calling service: %s",str(e))  
     
     arm_nav_client = actionlib.SimpleActionClient('/but_arm_manip/manual_arm_manip_action',ManualArmManipAction)
   
